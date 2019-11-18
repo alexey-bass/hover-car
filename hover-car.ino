@@ -1,175 +1,366 @@
-
-#include "ESP8266WiFi.h"
+#include <ESP8266WiFi.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <Adafruit_MCP4725.h>
+#include <SimpleTimer.h>
+#include <ESP8266WebServer.h>
 
-bool DEBUG_CONSOLE  = false;
 
-// SCL GPIO5
-// SDA GPIO4
-#define OLED_RESET 0  // GPIO0
-Adafruit_SSD1306 hcDisplay(OLED_RESET);
-
-Adafruit_MCP4725 hcDac;
-
-bool HC_PEDAL_ENGAGED_CURRENT = false;
-bool HC_PEDAL_ENGAGED_PREV = false;
 
 // ===== CONFIG =====
-uint8_t HC_LED_OUTPUT_PIN  = D4;
-uint8_t HC_PEDAL_INPUT_PIN = D6;
-uint8_t HC_ANALOG_IN_PIN   = A0;
+bool DEBUG_SERIAL  = true;
+
+const char *HC_WIFI_SSID = "YOUR_SSID";
+const char *HC_WIFI_PASSWORD = "YOUR_PASSWORD";
+
+uint8_t HC_LED_OUTPUT_PIN    = D4;
+uint8_t HC_REVERSE_INPUT_PIN = D6;
+uint8_t HC_BUZZER_OUTPUT_PIN = D5; // D5, D6, D7 or D8
+uint8_t HC_RELAY_OUTPUT_PIN  = D7; // D0, D1, D2, D5, D6, D7 or D8
 
 float    HC_DAC_SUPPLY_VOLTAGE = 3.3; // set correct DAC VCC voltage
 uint16_t HC_DAC_VALUE_MAX = 4095; // 0x0FFF
 
-// diff real value measured and set, should be 0.0
-// measure actual on Vout with multimeter when MIN is set diff here
-float    HC_DAC_ACTUAL_VOLTAGE_CORRECTION = +0.000; 
-
-float HC_THROTTLE_OUTPUT_LEVEL_CURRENT = 0.000; // start voltage
-float HC_THROTTLE_OUTPUT_LEVEL_MIN     = 1.100;
-float HC_THROTTLE_OUTPUT_LEVEL_MAX     = 1.500;
-float HC_THROTTLE_OUTPUT_LEVEL_STEP_UP = 0.050;
-float HC_THROTTLE_OUTPUT_LEVEL_STEP_DN = 0.100; // brake faster then accelerate
+float HC_THROTTLE_LEVEL_MIN = 1.300;
+float HC_THROTTLE_LEVEL_MAX = 3.300;
 // ===== END OF CONFIG =====
 
-void displaySetup() {
-  hcDisplay.begin(SSD1306_SWITCHCAPVCC, 0x3C); // 0x3C or 0x3D
-  hcDisplay.clearDisplay();
-  hcDisplay.display();
-  hcDisplay.setTextSize(1); // 6 rows, 10 cols
-  hcDisplay.setTextColor(WHITE);
-  hcDisplay.display();
-}
 
-void displayPrepare() {
-  hcDisplay.clearDisplay();
-//  hcDisplay.display();
-  hcDisplay.setCursor(0, 0);
-//  hcDisplay.print("Hover-Car");
-}
 
-int adcInput = 0;
-float voltageIn = 0;
-float MCP4725_reading;
+Adafruit_MCP4725 HC_DAC;
 
-void displayUpdate() {
-  displayPrepare();
-  String pedalStatus = (HC_PEDAL_ENGAGED_CURRENT) ? "YES" : "NO";
-  hcDisplay.printf("DIR: %s", (true) ? "F=>" : "<=B");
-  hcDisplay.printf("\nGAS: %s", (HC_PEDAL_ENGAGED_CURRENT) ? "YES" : "NO");
-  hcDisplay.printf("\nBRK: %s", "NO");
+SimpleTimer HC_TIMER;
+uint8_t HC_BUZZER_TIMER_ID;
+bool HC_BUZZER_REVERSE_SOUND_ON_PHASE = false;
 
-  adcInput = analogRead(HC_ANALOG_IN_PIN);
-  voltageIn = (adcInput * HC_DAC_SUPPLY_VOLTAGE) / 1023.0;
-  hcDisplay.print("\nVtg: ");
-  hcDisplay.print(HC_THROTTLE_OUTPUT_LEVEL_CURRENT, 3);
-  hcDisplay.print("\nVou: ");
-  hcDisplay.print(voltageIn, 3);
-  
-  hcDisplay.printf("\n%d", millis() / 100);
-}
+ESP8266WebServer HC_SERVER(80);
 
-void setDacVoltage(float target) {
-  target += HC_DAC_ACTUAL_VOLTAGE_CORRECTION;
-  hcDac.setVoltage(round((HC_DAC_VALUE_MAX * target) / HC_DAC_SUPPLY_VOLTAGE), false);
-} 
+bool HC_WIFI_CONNECTED = false;
+
+bool HC_REVERSE_ENGAGED = false;
+bool HC_REVERSE_DIRECTION = false;
+
+float HC_THROTTLE_FORWARD_LEVEL = HC_THROTTLE_LEVEL_MIN; // start voltage
+float HC_THROTTLE_REVERSE_LEVEL = HC_THROTTLE_LEVEL_MIN; // start voltage
+
+
 
 void setup() {
-  if (DEBUG_CONSOLE) {
-    Serial.begin(9600);
+  if (DEBUG_SERIAL) {
+    Serial.begin(115200);
+    Serial.println();
+    Serial.println("SETUP started");
   }
 
-  // disable wifi
-  //WiFi.mode(WIFI_OFF);
-  //WiFi.forceSleepBegin();
+  // keep wifi last thing to do on setup
+  hc_WifiSetup();
+  hc_ServerSetup();
 
-  // setup LED
-  pinMode(HC_LED_OUTPUT_PIN, OUTPUT);
-  digitalWrite(HC_LED_OUTPUT_PIN, HIGH); // LED set OFF
+  hc_LedSetup();
+  hc_RelaySetup();
 
   // set pedal input
-  pinMode(HC_PEDAL_INPUT_PIN, INPUT_PULLUP);
+  pinMode(HC_REVERSE_INPUT_PIN, INPUT_PULLUP);
 
-  // setup display
-  displaySetup();
+  hc_DacSetup();
+  
+  hc_BuzzerSetup();
+  hc_BuzzerPlayStartup();
+//  hc_BuzzerPlaySequence({1047, 1175, 1319, 1397, 1568}, 50);
+  
+  
+//  delay(1000);
+//  hc_DacSetVoltage(HC_THROTTLE_LEVEL_MIN);
 
-  // setup DAC
-  hcDac.begin(0x60);
-  setDacVoltage(HC_THROTTLE_OUTPUT_LEVEL_MIN);
-  HC_THROTTLE_OUTPUT_LEVEL_CURRENT = HC_THROTTLE_OUTPUT_LEVEL_MIN;
+  hc_TimersSetup();
 
-  displayUpdate();
+  // we starting from FORWARD direction
+  hc_DacSetVoltage(HC_THROTTLE_FORWARD_LEVEL);
+
+  if (DEBUG_SERIAL) Serial.println("SETUP finished");
 }
 
 void loop() {
-  HC_PEDAL_ENGAGED_CURRENT = (digitalRead(HC_PEDAL_INPUT_PIN) == LOW) ? true : false;
+  HC_TIMER.run();
 
-  // if pedal state changed
-  if (HC_PEDAL_ENGAGED_PREV != HC_PEDAL_ENGAGED_CURRENT) {
-
-    if (DEBUG_CONSOLE) {
-      Serial.print("Pedal: ");
-      Serial.print((HC_PEDAL_ENGAGED_CURRENT) ? "YES" : "NO");
-      Serial.print(", was ");
-      Serial.print((HC_PEDAL_ENGAGED_PREV) ? "YES" : "NO");
-      Serial.println();
-    }
-
-    if (HC_PEDAL_ENGAGED_CURRENT) {
-      digitalWrite(HC_LED_OUTPUT_PIN, LOW); // LED set ON
-    } else {
-      digitalWrite(HC_LED_OUTPUT_PIN, HIGH); // LED set OFF
-    }
-    
-    HC_PEDAL_ENGAGED_PREV = HC_PEDAL_ENGAGED_CURRENT;
-    
-    displayUpdate();
+  if (HC_WIFI_CONNECTED) {
+    HC_SERVER.handleClient();
   }
 
-  if (HC_PEDAL_ENGAGED_CURRENT && HC_THROTTLE_OUTPUT_LEVEL_CURRENT < HC_THROTTLE_OUTPUT_LEVEL_MAX) {
-    HC_THROTTLE_OUTPUT_LEVEL_CURRENT += HC_THROTTLE_OUTPUT_LEVEL_STEP_UP;
-    if (HC_THROTTLE_OUTPUT_LEVEL_CURRENT > HC_THROTTLE_OUTPUT_LEVEL_MAX) { // if exeed MAX
-      HC_THROTTLE_OUTPUT_LEVEL_CURRENT = HC_THROTTLE_OUTPUT_LEVEL_MAX;
-    }
-    
-    setDacVoltage(HC_THROTTLE_OUTPUT_LEVEL_CURRENT);
-    if (DEBUG_CONSOLE) {
-      //MCP4725_reading = (HC_DAC_SUPPLY_VOLTAGE / 4096.0) * HC_THROTTLE_OUTPUT_LEVEL_CURRENT; //3.3 is your supply voltage
-      Serial.print("Expected Voltage: ");
-      Serial.println(HC_THROTTLE_OUTPUT_LEVEL_CURRENT);
-      //Serial.print("Current Voltage: ");
-      //Serial.println(voltageIn);
-      //Serial.println(MCP4725_reading, 3);
-    }
-    
-    displayUpdate();
-    
-  } else if (!HC_PEDAL_ENGAGED_CURRENT && HC_THROTTLE_OUTPUT_LEVEL_CURRENT > HC_THROTTLE_OUTPUT_LEVEL_MIN) {
-    HC_THROTTLE_OUTPUT_LEVEL_CURRENT -= HC_THROTTLE_OUTPUT_LEVEL_STEP_DN;
-    if (HC_THROTTLE_OUTPUT_LEVEL_CURRENT < HC_THROTTLE_OUTPUT_LEVEL_MIN) { // if we went negative
-      HC_THROTTLE_OUTPUT_LEVEL_CURRENT = HC_THROTTLE_OUTPUT_LEVEL_MIN;
-    }
-    
-    setDacVoltage(HC_THROTTLE_OUTPUT_LEVEL_CURRENT);
-    if (DEBUG_CONSOLE) {
-      //MCP4725_reading = (3.3/4096.0) * HC_THROTTLE_OUTPUT_LEVEL_CURRENT; //3.3 is your supply voltage
-      Serial.print("Expected Voltage: ");
-      Serial.println(HC_THROTTLE_OUTPUT_LEVEL_CURRENT);
-      //Serial.print("Current Voltage: ");
-      //Serial.println(voltageIn);
-      //Serial.println(MCP4725_reading, 3);
-    }
+  switch (WiFi.status()) {
+    case WL_CONNECTED:
+      if (!HC_WIFI_CONNECTED) {
+        if (DEBUG_SERIAL) {
+          Serial.print("Connected to WIFI network: ");
+          Serial.println(HC_WIFI_SSID);
+          Serial.print("Got IP address: ");
+          Serial.println(WiFi.localIP());
+        }
+        HC_WIFI_CONNECTED = true;
+        digitalWrite(HC_LED_OUTPUT_PIN, LOW); // LED set ON
+        hc_BuzzerPlayWifiConnected();
+      }
+      break;
 
-    displayUpdate();
+//    case WL_IDLE_STATUS:
+//    case WL_NO_SSID_AVAIL:
+//    case WL_CONNECT_FAILED:
+//    case WL_CONNECTION_LOST:
+//    case WL_DISCONNECTED:
+    default:
+      if (HC_WIFI_CONNECTED) {
+        if (DEBUG_SERIAL) {
+          Serial.print("Disconnected from WIFI network: ");
+          Serial.println(HC_WIFI_SSID);
+        }
+        HC_WIFI_CONNECTED = false;
+        digitalWrite(HC_LED_OUTPUT_PIN, HIGH); // LED set OFF
+        hc_BuzzerPlayWifiDisconnected();
+      }
+      break;
   }
 
-  // finally, update display
-  hcDisplay.display();
+  HC_REVERSE_ENGAGED = (digitalRead(HC_REVERSE_INPUT_PIN) == LOW) ? true : false;
+
+  // TODO: when driving fast and reverse engaged - we need to stop (send brake signal)
+  //       to avoid driver's injury
+
+  if (!HC_REVERSE_ENGAGED) {
+    if (HC_REVERSE_DIRECTION) {
+      if (DEBUG_SERIAL) Serial.println("Change direction to FORWARD");
+      HC_REVERSE_DIRECTION = false;
+      HC_TIMER.disable(HC_BUZZER_TIMER_ID);
+      digitalWrite(HC_RELAY_OUTPUT_PIN, LOW);
+      hc_DacSetVoltage(HC_THROTTLE_FORWARD_LEVEL);
+    }
+  } else {
+    if (!HC_REVERSE_DIRECTION) {
+      if (DEBUG_SERIAL) Serial.println("Change direction to REVERSE");
+      HC_REVERSE_DIRECTION = true;
+      HC_TIMER.enable(HC_BUZZER_TIMER_ID);
+      digitalWrite(HC_RELAY_OUTPUT_PIN, HIGH);
+      hc_DacSetVoltage(HC_THROTTLE_REVERSE_LEVEL);
+    }
+  }
+
+  delay(1000);
+}
+
+
+
+
+
+void hc_DacSetVoltage(float target) {
+  if (DEBUG_SERIAL) {
+    Serial.print("DAC new target voltage: ");
+    Serial.println(target);
+  }
+  HC_DAC.setVoltage(round((HC_DAC_VALUE_MAX * target) / HC_DAC_SUPPLY_VOLTAGE), false);
+}
+
+void hc_LedSetup() {
+  pinMode(HC_LED_OUTPUT_PIN, OUTPUT);
+  digitalWrite(HC_LED_OUTPUT_PIN, HIGH); // LED set OFF
+}
+
+void hc_DacSetup() {
+  // For Adafruit MCP4725A1 the address is 0x62 (default) or 0x63 (ADDR pin tied to VCC)
+  // For MCP4725A0 the address is 0x60 or 0x61
+  // For MCP4725A2 the address is 0x64 or 0x65
+  HC_DAC.begin(0x60);
+}
+
+void hc_WifiSetup() {
+//  WiFi.mode(WIFI_OFF);
+//  WiFi.forceSleepBegin();
+  WiFi.disconnect();
+  WiFi.setAutoConnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(HC_WIFI_SSID, HC_WIFI_PASSWORD);
+}
+
+void hc_ServerHandleHome() {
+  String response = "";
+
+  response += "<html>\n";
+  response += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">";
+  response += "<body>\n";
+  response += "<h3>Hover Car v2.0</h3>\n";
+  response += "<pre>\n";
+  response += "\nCurrent settings";
+  response += "\n- FORWARD: "+ String(HC_THROTTLE_FORWARD_LEVEL) + " V";
+  response += "\n- REVERSE: "+ String(HC_THROTTLE_REVERSE_LEVEL) + " V";
+  response += "\n";
+  response += "\nPresets";
+  response += "\n- <a href='/set/?forward=1.5'>F=1.5</a>";
+  response += "\n- <a href='/set/?forward=2.0'>F=2.0</a>";
+  response += "\n- <a href='/set/?forward=2.5'>F=2.5</a>";
+  response += "\n- <a href='/set/?forward=3.0'>F=3.0</a>";
+  response += "</pre>\n";
+
+  response += "\n</body></html>";
   
-  delay(100);
+  HC_SERVER.send(200, "text/html", response);
+}
+
+float hc_ValidateThrottleLimits(float level) {
+  if (level > HC_THROTTLE_LEVEL_MAX) {
+    return HC_THROTTLE_LEVEL_MAX;
+  } else if (level < HC_THROTTLE_LEVEL_MIN) {
+    return HC_THROTTLE_LEVEL_MIN;
+  }
+  return level;
+}
+
+void hc_ServerHandleSet() {
+  for (int i = 0; i < HC_SERVER.args(); i++) {
+    if (HC_SERVER.argName(i) == "forward") {
+      HC_THROTTLE_FORWARD_LEVEL = hc_ValidateThrottleLimits(HC_SERVER.arg(i).toFloat());
+      if (DEBUG_SERIAL) {
+        Serial.print("Set FORWARD voltage to ");
+        Serial.println(HC_THROTTLE_FORWARD_LEVEL);
+      }
+      hc_BuzzerPlayForwardApplied();
+    } else if (HC_SERVER.argName(i) == "reverse") {
+      HC_THROTTLE_REVERSE_LEVEL = hc_ValidateThrottleLimits(HC_SERVER.arg(i).toFloat());
+      if (DEBUG_SERIAL) {
+        Serial.print("Set REVERSE voltage to ");
+        Serial.println(HC_THROTTLE_REVERSE_LEVEL);
+      }
+      hc_BuzzerPlayReverseApplied();
+    }
+  } 
+
+  if (!HC_REVERSE_DIRECTION) {
+    hc_DacSetVoltage(HC_THROTTLE_FORWARD_LEVEL);
+  } else {
+    hc_DacSetVoltage(HC_THROTTLE_REVERSE_LEVEL);
+  }
+
+  HC_SERVER.sendHeader("Location", "/");
+  HC_SERVER.send(303); 
+}
+
+void hc_ServerSetup() {
+  HC_SERVER.on("/",     hc_ServerHandleHome);
+  HC_SERVER.on("/set/", hc_ServerHandleSet);
+  HC_SERVER.onNotFound([]() {
+    HC_SERVER.send(404, "text/plain", "ERROR 404: Page Not Found");
+  });
+  HC_SERVER.begin();
+}
+
+void hc_RelaySetup() {
+  pinMode(HC_RELAY_OUTPUT_PIN, OUTPUT);
+  digitalWrite(HC_RELAY_OUTPUT_PIN, LOW);
+}
+
+void hc_BuzzerSetup() {
+  pinMode(HC_BUZZER_OUTPUT_PIN, OUTPUT);
+  digitalWrite(HC_BUZZER_OUTPUT_PIN, LOW);
+}
+
+void hc_TimersSetup() {
+  HC_BUZZER_TIMER_ID = HC_TIMER.setInterval(500, hc_BuzzerPlayReverse);
+  HC_TIMER.disable(HC_BUZZER_TIMER_ID);
+}
+
+/* TODO Make this work to use in all Play* calls
+void hc_BuzzerPlaySequence(int tones[], int pause) {
+  // https://github.com/wemos/D1_mini_Examples/blob/master/examples/04.Shields/Buzzer_Shield/Do_Re_Mi/Do_Re_Mi.ino
+  // Note name: C6 D6 E6 F6 G6 http://newt.phys.unsw.edu.au/jw/notes.html
+  uint8_t len = sizeof(tones) / sizeof(tones[0]);
+  for (int i = 0; i < len; i++) {
+    tone(HC_BUZZER_OUTPUT_PIN, tones[i]);
+    delay(pause);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+    if (i != len -1) { // skip last delay
+      delay(pause);
+    }
+  }
+}
+*/
+
+void hc_BuzzerPlayStartup() {
+  int tones[] = {1047, 1175, 1319, 1397, 1568};
+  uint8_t pause = 50;
+  
+  uint8_t len = sizeof(tones) / sizeof(tones[0]);
+  for (int i = 0; i < len; i++) {
+    tone(HC_BUZZER_OUTPUT_PIN, tones[i]);
+    delay(pause);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+    if (i != len -1) { // skip last delay
+      delay(pause);
+    }
+  }
+}
+
+void hc_BuzzerPlayWifiConnected() {
+  int tones[] = {440, 493, 523};
+  uint8_t pause = 100;
+  
+  uint8_t len = sizeof(tones) / sizeof(tones[0]);
+  for (int i = 0; i < len; i++) {
+    tone(HC_BUZZER_OUTPUT_PIN, tones[i]);
+    delay(pause);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+    if (i != len -1) { // skip last delay
+      delay(pause);
+    }
+  }
+}
+
+void hc_BuzzerPlayWifiDisconnected() {
+  int tones[] = {523, 493, 440};
+  uint8_t pause = 100;
+  
+  uint8_t len = sizeof(tones) / sizeof(tones[0]);
+  for (int i = 0; i < len; i++) {
+    tone(HC_BUZZER_OUTPUT_PIN, tones[i]);
+    delay(pause);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+    if (i != len -1) { // skip last delay
+      delay(pause);
+    }
+  }
+}
+
+void hc_BuzzerPlayForwardApplied() {
+  int tones[] = {523, 587, 659};
+  uint8_t pause = 50;
+  
+  uint8_t len = sizeof(tones) / sizeof(tones[0]);
+  for (int i = 0; i < len; i++) {
+    tone(HC_BUZZER_OUTPUT_PIN, tones[i]);
+    delay(pause);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+    if (i != len -1) { // skip last delay
+      delay(pause);
+    }
+  }
+}
+
+void hc_BuzzerPlayReverseApplied() {
+  int tones[] = {220, 246, 261};
+  uint8_t pause = 50;
+  
+  uint8_t len = sizeof(tones) / sizeof(tones[0]);
+  for (int i = 0; i < len; i++) {
+    tone(HC_BUZZER_OUTPUT_PIN, tones[i]);
+    delay(pause);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+    if (i != len -1) { // skip last delay
+      delay(pause);
+    }
+  }
+}
+
+void hc_BuzzerPlayReverse() {
+  if (!HC_BUZZER_REVERSE_SOUND_ON_PHASE) {
+    tone(HC_BUZZER_OUTPUT_PIN, 2000);
+    delay(500);
+    noTone(HC_BUZZER_OUTPUT_PIN);
+  }
+  HC_BUZZER_REVERSE_SOUND_ON_PHASE = !HC_BUZZER_REVERSE_SOUND_ON_PHASE; 
 }
