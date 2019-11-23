@@ -8,21 +8,22 @@
 
 
 // ===== CONFIG =====
-bool DEBUG_SERIAL  = true;
+bool DEBUG_SERIAL  = false;
 
 const char *HC_WIFI_SSID = "YOUR_SSID";
 const char *HC_WIFI_PASSWORD = "YOUR_PASSWORD";
 
+uint8_t HC_DAC_ADDRESS = 0x60; // see DacSetup for details
 uint8_t HC_LED_OUTPUT_PIN    = D4;
 uint8_t HC_REVERSE_INPUT_PIN = D6;
 uint8_t HC_BUZZER_OUTPUT_PIN = D5; // D5, D6, D7 or D8
 uint8_t HC_RELAY_OUTPUT_PIN  = D7; // D0, D1, D2, D5, D6, D7 or D8
 
-float    HC_DAC_SUPPLY_VOLTAGE = 3.3; // set correct DAC VCC voltage
+float    HC_DAC_SUPPLY_VOLTAGE = 5.0; // set correct DAC VCC voltage
 uint16_t HC_DAC_VALUE_MAX = 4095; // 0x0FFF
 
-float HC_THROTTLE_LEVEL_MIN = 1.300;
-float HC_THROTTLE_LEVEL_MAX = 3.300;
+float HC_THROTTLE_LEVEL_MIN = 1.500;
+float HC_THROTTLE_LEVEL_MAX = 5.000;
 // ===== END OF CONFIG =====
 
 
@@ -69,9 +70,6 @@ void setup() {
 //  hc_BuzzerPlaySequence({1047, 1175, 1319, 1397, 1568}, 50);
   
   
-//  delay(1000);
-//  hc_DacSetVoltage(HC_THROTTLE_LEVEL_MIN);
-
   hc_TimersSetup();
 
   // we starting from FORWARD direction
@@ -143,7 +141,7 @@ void loop() {
     }
   }
 
-  delay(1000);
+  delay(500);
 }
 
 
@@ -167,7 +165,7 @@ void hc_DacSetup() {
   // For Adafruit MCP4725A1 the address is 0x62 (default) or 0x63 (ADDR pin tied to VCC)
   // For MCP4725A0 the address is 0x60 or 0x61
   // For MCP4725A2 the address is 0x64 or 0x65
-  HC_DAC.begin(0x60);
+  HC_DAC.begin(HC_DAC_ADDRESS);
 }
 
 void hc_WifiSetup() {
@@ -183,25 +181,62 @@ void hc_ServerHandleHome() {
   String response = "";
 
   response += "<html>\n";
-  response += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">";
+  response += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n";
   response += "<body>\n";
   response += "<h3>Hover Car v2.0</h3>\n";
   response += "<pre>\n";
-  response += "\nCurrent settings";
-  response += "\n- FORWARD: "+ String(HC_THROTTLE_FORWARD_LEVEL) + " V";
-  response += "\n- REVERSE: "+ String(HC_THROTTLE_REVERSE_LEVEL) + " V";
+  
+  response += "<b>Current settings</b>\n";
+  response += "FORWARD: "+ String(HC_THROTTLE_FORWARD_LEVEL) + " V\n";
+  response += "REVERSE: "+ String(HC_THROTTLE_REVERSE_LEVEL) + " V\n";
   response += "\n";
-  response += "\nPresets";
-  response += "\n- <a href='/set/?forward=1.5'>F=1.5</a>";
-  response += "\n- <a href='/set/?forward=2.0'>F=2.0</a>";
-  response += "\n- <a href='/set/?forward=2.5'>F=2.5</a>";
-  response += "\n- <a href='/set/?forward=3.0'>F=3.0</a>";
+
+  response += "<b>Stats</b>\n";
+  response += "Uptime: "+ hc_Uptime() +"\n";
+  response += "WIFI RSSI: "+ String(WiFi.RSSI()) +"\n";
+  response += "\n";
+  
+  response += "<b>Presets</b>\n";
+  response += "\n";
+  response += "<a href='/set/?forward=1.5'>F=1.5</a>\n";
+  response += "\n";
+  response += "<a href='/set/?forward=2.3'>F=2.3</a>  ";
+  response += "<a href='/set/?forward=2.5'>F=2.5</a>\n";
+  response += "\n";
+  response += "<a href='/set/?forward=3.0'>F=3.0</a>  ";
+  response += "<a href='/set/?forward=3.5'>F=3.5</a>\n";
+  response += "\n";
+  response += "<a href='/set/?forward=4.0'>F=4.0</a>  ";
+  response += "<a href='/set/?forward=4.5'>F=4.5</a>\n";
+  response += "\n";
+  response += "<a href='/set/?forward=5.0'>F=5.0</a>\n";
+  response += "\n";
+
   response += "</pre>\n";
 
-  response += "\n</body></html>";
+  response += "</body></html>\n";
   
   HC_SERVER.send(200, "text/html", response);
 }
+
+
+String hc_Uptime() {
+  char result[16];
+  
+  long t = millis();
+  uint32_t milliseconds = t % 1000;
+  t /= 1000;
+  uint8_t seconds = t % 60;
+  t /= 60;
+  uint8_t minutes = t % 60;
+  t /= 60;
+  uint8_t hours = t % 24;
+
+  sprintf(result, "%02d:%02d:%02d.%03d", hours, minutes, seconds, milliseconds);
+  
+  return result;
+}
+
 
 float hc_ValidateThrottleLimits(float level) {
   if (level > HC_THROTTLE_LEVEL_MAX) {
