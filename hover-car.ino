@@ -219,7 +219,6 @@ void hc_ServerHandleHome() {
   HC_SERVER.send(200, "text/html", response);
 }
 
-
 String hc_Uptime() {
   char result[16];
   
@@ -236,7 +235,6 @@ String hc_Uptime() {
   
   return result;
 }
-
 
 float hc_ValidateThrottleLimits(float level) {
   if (level > HC_THROTTLE_LEVEL_MAX) {
